@@ -2863,7 +2863,7 @@ index 000000000000..1dfecf256393
 +
 +static struct platform_driver hdmirx_driver = {
 +	.probe = hdmirx_probe,
-+	.remove = hdmirx_remove,
++	.remove_new = hdmirx_remove,
 +	.driver = {
 +		.name = "snps_hdmirx",
 +		.of_match_table = hdmirx_id,
