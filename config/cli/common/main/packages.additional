@@ -37,6 +37,7 @@ libpam-systemd
 libproc-processtable-perl
 libwrap0-dev
 mc
+neovim
 nfs-common
 ntfs-3g
 pciutils
@@ -51,6 +52,7 @@ software-properties-common
 smartmontools
 stress
 sysfsutils
+tmux
 unattended-upgrades
 unicode-data
 unzip
