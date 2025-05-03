@@ -15,8 +15,10 @@ ubuntu-*-cloudimg-console.log
 /.tmp/
 /output/
 /cache/
-/*userpatches*/
-/userpatches
+/userpatches/*
+!/userpatches/customize-image-host.sh
+!/userpatches/customize-image.sh
+repos
 
 ### General annoyances ###
 .DS_Store
