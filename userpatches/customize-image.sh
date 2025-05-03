@@ -17,6 +17,22 @@ LINUXFAMILY=$2
 BOARD=$3
 BUILD_DESKTOP=$4
 
+SRC=/tmp/overlay/src
+STAGE=/tmp/pkg-stage        # never copied into image
+mkdir -p "${STAGE}"
+JOBS=$(nproc)
+
+# helper to cmake/meson + DESTDIR stage
+build_and_stage() {
+    local name=$1 conf_cmd=$2 build_cmd=$3 install_cmd=$4
+    echo "[build] $name"
+    pushd "${SRC}/${name}"
+      eval "${conf_cmd}"
+      eval "${build_cmd}"
+      eval "${install_cmd} DESTDIR=${STAGE}"
+    popd
+}
+
 Main() {
 	case $RELEASE in
 		noble)
@@ -156,6 +172,46 @@ Main() {
 			# your code here
 			;;
 	esac
+	if [[ -d ${SRC}/mesa ]]; then
+	  build_and_stage mesa \
+		"meson setup build -Dvulkan-drivers= -Dgallium-drivers=panfrost -Degl=enabled -Dgbm=enabled -Dglvnd=enabled" \
+		"ninja -C build -j$JOBS" \
+		"ninja -C build install"
+	fi
+
+	# 2) rkmpp
+	build_and_stage rkmpp \
+	  "rm -rf rkmpp_build && mkdir rkmpp_build && cd rkmpp_build && cmake -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TEST=OFF .." \
+	  "make -C rkmpp_build -j$JOBS" \
+	  "make -C rkmpp_build install"
+
+	# 3) rkrga
+	build_and_stage rkrga \
+	  "meson setup rkrga_build --prefix=/usr --libdir=lib --buildtype=release --default-library=shared -Dcpp_args=-fpermissive -Dlibdrm=false -Dlibrga_demo=false" \
+	  "ninja -C rkrga_build -j$JOBS" \
+	  "ninja -C rkrga_build install"
+
+	# 4) ffmpeg‑rockchip
+	build_and_stage ffmpeg-rockchip \
+	  "./configure --prefix=/usr --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --disable-xlib --disable-libxcb --disable-libxcb-shm --disable-libxcb-xfixes --disable-libxcb-shape" \
+	  "make -j$JOBS" \
+	  "make install"
+
+	# 5) Qt base
+	QtV=6.8.3
+	build_and_stage qtbase \
+	  "rm -rf build && mkdir build && cd build && cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=RelWithDebInfo -DINSTALL_BINDIR=lib/qt6/bin -DINSTALL_PUBLICBINDIR=usr/bin -DINSTALL_LIBEXECDIR=lib/qt6 -DINSTALL_DOCDIR=share/doc/qt6 -DINSTALL_ARCHDATADIR=lib/qt6 -DINSTALL_DATADIR=share/qt6 -DINSTALL_INCLUDEDIR=include/qt6 -DINSTALL_MKSPECSDIR=lib/qt6/mkspecs -DQT_NO_MAKE_EXAMPLES=ON -DQT_BUILD_EXAMPLES_BY_DEFAULT=OFF -DQT_BUILD_TESTS_BY_DEFAULT=OFF -DQT_INSTALL_EXAMPLES_SOURCES_BY_DEFAULT=OFF -DFEATURE_journald=ON -DFEATURE_libproxy=ON -DQT_FEATURE_eglfs=ON -DFEATURE_openssl_linked=ON -DFEATURE_system_sqlite=ON -DFEATURE_no_direct_extern_access=OFF -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON -DQT_FEATURE_opengles2=ON -DQT_FEATURE_opengles3=ON .." \
+	  "cmake --build build -j$JOBS" \
+	  "cmake --install build"
+
+	# 6..9) Qt modules, ECM, ktexttemplate, qtkeychain  (loop)
+	for mod in qtshadertools qtwebsockets qtdeclarative qtmultimedia qtnetworkauth qthttpserver qtremoteobjects extra-cmake-modules ktexttemplate qtkeychain; do
+	  [[ -d ${SRC}/${mod} ]] || continue
+	  build_and_stage "${mod}" \
+		"rm -rf build && mkdir build && cd build && cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=RelWithDebInfo -DINSTALL_BINDIR=lib/qt6/bin -DINSTALL_PUBLICBINDIR=usr/bin -DINSTALL_LIBEXECDIR=lib/qt6 -DINSTALL_DATADIR=share/qt6 -DINSTALL_INCLUDEDIR=include/qt6 -DINSTALL_MKSPECSDIR=lib/qt6/mkspecs -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON .." \
+		"cmake --build build -j$JOBS" \
+		"cmake --install build"
+	done
 } # Main
 
 InstallOpenMediaVault() {
