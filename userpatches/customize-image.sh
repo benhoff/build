@@ -11,6 +11,7 @@
 # NOTE: If you want to transfer files between chroot and host
 # userpatches/overlay directory on host is bind-mounted to /tmp/overlay in chroot
 # The sd card's root path is accessible via $SDCARD variable.
+set -euo pipefail
 
 RELEASE=$1
 LINUXFAMILY=$2
@@ -26,12 +27,18 @@ JOBS=$(nproc)
 build_and_stage() {
     local name=$1 conf_cmd=$2 build_cmd=$3 install_cmd=$4
     echo "[build] $name"
-    pushd "${SRC}/${name}"
+    local WRK=/tmp/build-${name}
+    rm -rf "${WRK}"
+    rsync -a --delete "${SRC}/${name}/" "${WRK}/"
+    pushd "${WRK}"
       eval "${conf_cmd}"
       eval "${build_cmd}"
-      eval "${install_cmd} DESTDIR=${STAGE}"
+      # prepend DESTDIR for any install_cmd you pass
+      DESTDIR="${STAGE}" eval "${install_cmd}"
     popd
+    rm -rf "${WRK}"
 }
+
 
 Main() {
 	case $RELEASE in
@@ -173,17 +180,17 @@ Main() {
 			;;
 	esac
 	if [[ -d ${SRC}/mesa ]]; then
-	  build_and_stage mesa \
-		"meson setup build -Dvulkan-drivers= -Dgallium-drivers=panfrost -Degl=enabled -Dgbm=enabled -Dglvnd=enabled" \
-		"ninja -C build -j$JOBS" \
-		"ninja -C build install"
+		build_and_stage mesa \
+			"meson setup build -Dvulkan-drivers= -Dgallium-drivers=panfrost -Degl=true -Dgbm=true -Dglvnd=true" \
+			"ninja -C build -j$JOBS" \
+			"DESTDIR=${STAGE} ninja -C build install"
 	fi
 
 	# 2) rkmpp
 	build_and_stage rkmpp \
-	  "rm -rf rkmpp_build && mkdir rkmpp_build && cd rkmpp_build && cmake -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TEST=OFF .." \
-	  "make -C rkmpp_build -j$JOBS" \
-	  "make -C rkmpp_build install"
+  "rm -rf rkmpp_build && mkdir rkmpp_build && cmake -S . -B rkmpp_build -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TEST=OFF" \
+  "make -C rkmpp_build -j$JOBS" \
+  "DESTDIR=${STAGE} make -C rkmpp_build install"
 
 	# 3) rkrga
 	build_and_stage rkrga \
@@ -191,11 +198,19 @@ Main() {
 	  "ninja -C rkrga_build -j$JOBS" \
 	  "ninja -C rkrga_build install"
 
+	# -- make staged .pc, .so, and headers visible for anything that follows --
+	export PKG_CONFIG_PATH="${STAGE}/usr/lib/pkgconfig:${PKG_CONFIG_PATH:-/usr/lib/pkgconfig:/usr/share/pkgconfig}"
+	export CFLAGS="-I${STAGE}/usr/include ${CFLAGS:-}"
+	export LDFLAGS="-L${STAGE}/usr/lib ${LDFLAGS:-}"
+	export LD_LIBRARY_PATH="${STAGE}/usr/lib:${LD_LIBRARY_PATH:-}"
 	# 4) ffmpeg‑rockchip
 	build_and_stage ffmpeg-rockchip \
-	  "./configure --prefix=/usr --enable-version3 --enable-libdrm --enable-rkmpp --enable-rkrga --disable-xlib --disable-libxcb --disable-libxcb-shm --disable-libxcb-xfixes --disable-libxcb-shape" \
+	  "./configure --prefix=/usr --enable-version3 \
+				   --enable-libdrm --enable-rkmpp --enable-rkrga \
+				   --disable-xlib --disable-libxcb --disable-libxcb-shm \
+				   --disable-libxcb-xfixes --disable-libxcb-shape" \
 	  "make -j$JOBS" \
-	  "make install"
+	  "DESTDIR=${STAGE} make install"
 
 	# 5) Qt base
 	QtV=6.8.3

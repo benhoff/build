@@ -1,40 +1,48 @@
 #!/usr/bin/env bash
 set -e
 
-# ────────── host‑side folder map ──────────────────────────
-OVL_DIR="${USERPATCHES_PATH}/overlay"          # bind‑mounted later at /tmp/overlay
-SRC_DIR="${OVL_DIR}/src"                       # chroot will see this as /tmp/overlay/src
-GIT_CACHE="$(dirname "$USERPATCHES_PATH")/repos"   # purely host; not used by Armbian
+# ────────── host-side folder map ──────────────────────────
+PATCHES_DIR="${USERPATCHES_PATH}/src"         # where we keep our “master” clones
+OVL_DIR="${USERPATCHES_PATH}/overlay"        # bind-mounted later at /tmp/overlay
+OVL_SRC="${OVL_DIR}/src"                     # chroot will see this as /tmp/overlay/src
 
-mkdir -p "${OVL_DIR}" "${SRC_DIR}" "${GIT_CACHE}"
+# ensure directories exist
+mkdir -p "${PATCHES_DIR}" "${OVL_DIR}" "${OVL_SRC}"
 
 # ────────── helper: clone or refresh repo ─────────────────
 clone_or_update() {
-    local url=$1   repo_name=$2   ref=${3:-main}
-    local repo_path="${GIT_CACHE}/${repo_name}"
+    local url=$1
+    local repo_name=$2
+    local ref=${3:-main}
 
-    # Git “safe.directory” so UID mismatch inside Docker isn’t an issue
-    git config --global --add safe.directory "${repo_path}"
+    local local_repo="${PATCHES_DIR}/${repo_name}"
+    local overlay_repo="${OVL_SRC}/${repo_name}"
 
-    if [[ -d "${repo_path}/.git" ]]; then
+    # avoid safe.directory errors inside Docker
+    git config --global --add safe.directory "${local_repo}"
+
+    if [[ -d "${local_repo}/.git" ]]; then
         echo "[host] Updating ${repo_name} → ${ref}"
-        git -C "${repo_path}" fetch --prune --tags
-        git -C "${repo_path}" checkout "${ref}"
-        # pull only if it's a branch
-        git -C "${repo_path}" rev-parse --verify --quiet "origin/${ref}" && \
-          git -C "${repo_path}" pull --ff-only || true
+        git -C "${local_repo}" fetch --prune --tags
+        git -C "${local_repo}" checkout "${ref}"
+        # only pull if it's really a branch
+        if git -C "${local_repo}" rev-parse --verify --quiet "origin/${ref}"; then
+            git -C "${local_repo}" pull --ff-only
+        fi
     else
         echo "[host] Cloning ${repo_name} → ${ref}"
         if git ls-remote --heads "${url}" "${ref}" &>/dev/null; then
-            git clone --depth 1 --branch "${ref}" "${url}" "${repo_path}"
+            git clone --depth 1 --branch "${ref}" "${url}" "${local_repo}"
         else
-            git clone "${url}" "${repo_path}"
-            git -C "${repo_path}" checkout --detach "${ref}"
+            git clone "${url}" "${local_repo}"
+            git -C "${local_repo}" checkout --detach "${ref}"
         fi
     fi
 
-    # expose clean tree (no .git) to chroot
-    rsync -a --delete --exclude=.git "${repo_path}/" "${SRC_DIR}/${repo_name}/"
+    # ────────── mirror into overlay ─────────────────────────
+    rm -rf "${overlay_repo}"
+    mkdir -p "${OVL_SRC}"
+    cp -a "${local_repo}" "${overlay_repo}"
 }
 
 # ────────── versions & repo list ──────────────────────────
