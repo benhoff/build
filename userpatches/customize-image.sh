@@ -19,22 +19,90 @@ BOARD=$3
 BUILD_DESKTOP=$4
 
 SRC=/tmp/overlay/src
-STAGE=/tmp/pkg-stage        # never copied into image
-mkdir -p "${STAGE}"
+STAGE=""
 JOBS=$(nproc)
 
-# helper to cmake/meson + DESTDIR stage
+# Persisted cache dir (host side: build/cache/ccache)
+export CCACHE_DIR="/var/cache/ccache"
+mkdir -p "${CCACHE_DIR}"
+
+# Fast tmpfs staging to avoid write‑amplification on the cache drive
+export CCACHE_TEMPDIR="/dev/shm/ccache-tmp"
+mkdir -p "${CCACHE_TEMPDIR}"
+
+# Base directory for hash‑normalisation
+# Choose a path that is the *same* across builds; using /tmp/overlay/src works
+export CCACHE_BASEDIR="/tmp/overlay/src"
+
+# Make sure the wrappers are found first
+export PATH="/usr/lib/ccache:${PATH}"
+
+# Optional: forward existing distcc settings if you have them
+[[ -n "${DISTCC_DIR:-}" ]]      && export DISTCC_DIR
+[[ -n "${DISTCC_HOSTS:-}" ]]    && export DISTCC_HOSTS
+[[ -n "${DISTCC_POTENTIAL_HOSTS:-}" ]] && export DISTCC_POTENTIAL_HOSTS
+
+# ---------------------------------------------------------------------------
 build_and_stage() {
     local name=$1 conf_cmd=$2 build_cmd=$3 install_cmd=$4
-    echo "[build] $name"
-    local WRK=/tmp/build-${name}
+
+    # ── unique revision identifier ─────────────────────────────────────────
+    local rev
+    if [[ -d "${SRC}/${name}/.git" ]]; then
+        rev=$(git -C "${SRC}/${name}" rev-parse --short HEAD)
+    else
+        rev=$(stat -c %Y "${SRC}/${name}")           # mtime fallback
+    fi
+
+    # ── cache paths ───────────────────────────────────────────────────────
+    local cache_dir="${CACHE_ROOT}/${name}"
+    local artefact_tar="${cache_dir}/${rev}.tar.zst"
+    local build_tar="${cache_dir}/${rev}.build.tar.zst"
+
+    # ── reuse cache if possible ───────────────────────────────────────────
+    if [[ ${CACHE_DISABLE} -eq 0 && -f "${artefact_tar}" ]]; then
+        echo "[cache  ] ${name} – restoring artefacts (${rev})"
+        if [[ -n "${STAGE}" ]]; then
+            tar --zstd -xf "${artefact_tar}" -C "${STAGE}"
+        else
+            tar --zstd -xf "${artefact_tar}" -C /
+        fi
+
+        # Restore build dir as convenience for interactive hacking
+        if [[ -f "${build_tar}" ]]; then
+            local WRK="/tmp/build-${name}"
+            rm -rf "${WRK}"
+            mkdir -p "${WRK}"
+            tar --zstd -xf "${build_tar}" -C "${WRK}"
+        fi
+        return
+    fi
+
+    # ── fresh build path ──────────────────────────────────────────────────
+    echo "[build  ] ${name}"
+    mkdir -p "${cache_dir}"
+    local WRK="/tmp/build-${name}"
     rm -rf "${WRK}"
     rsync -a --delete "${SRC}/${name}/" "${WRK}/"
     pushd "${WRK}"
-      eval "${conf_cmd}"
-      eval "${build_cmd}"
-      # prepend DESTDIR for any install_cmd you pass
-      DESTDIR="${STAGE}" eval "${install_cmd}"
+
+    # ── configure / compile / install ─────────────────────────────────────
+    eval "${conf_cmd}"
+    eval "${build_cmd}"
+
+    if [[ -n "${STAGE}" ]]; then
+        DESTDIR="${STAGE}" eval "${install_cmd}"
+        tar --zstd -cf "${artefact_tar}.tmp" -C "${STAGE}" .
+    else
+        eval "${install_cmd}"
+        tar --zstd -cf "${artefact_tar}.tmp" -C / .
+    fi
+    mv "${artefact_tar}.tmp" "${artefact_tar}"   # atomic
+
+    # ── save build directory (incremental convenience) ────────────────────
+    tar --zstd -cf "${build_tar}.tmp" -C "${WRK}" .
+    mv "${build_tar}.tmp" "${build_tar}"
+
     popd
     rm -rf "${WRK}"
 }
@@ -45,6 +113,7 @@ Main() {
 		noble)
 			apt-get update && \
 				apt-get install -y --no-install-recommends \
+				ccache \
 				build-essential \
 				locales \
 				git \
@@ -188,21 +257,15 @@ Main() {
 
 	# 2) rkmpp
 	build_and_stage rkmpp \
-  "rm -rf rkmpp_build && mkdir rkmpp_build && cmake -S . -B rkmpp_build -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TEST=OFF" \
-  "make -C rkmpp_build -j$JOBS" \
-  "DESTDIR=${STAGE} make -C rkmpp_build install"
+   "rm -rf rkmpp_build && mkdir rkmpp_build && cmake -S . -B rkmpp_build -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DBUILD_TEST=OFF" \
+   "make -C rkmpp_build -j$JOBS" \
+   "make -C rkmpp_build install"
 
-	# 3) rkrga
 	build_and_stage rkrga \
 	  "meson setup rkrga_build --prefix=/usr --libdir=lib --buildtype=release --default-library=shared -Dcpp_args=-fpermissive -Dlibdrm=false -Dlibrga_demo=false" \
 	  "ninja -C rkrga_build -j$JOBS" \
 	  "ninja -C rkrga_build install"
 
-	# -- make staged .pc, .so, and headers visible for anything that follows --
-	export PKG_CONFIG_PATH="${STAGE}/usr/lib/pkgconfig:${PKG_CONFIG_PATH:-/usr/lib/pkgconfig:/usr/share/pkgconfig}"
-	export CFLAGS="-I${STAGE}/usr/include ${CFLAGS:-}"
-	export LDFLAGS="-L${STAGE}/usr/lib ${LDFLAGS:-}"
-	export LD_LIBRARY_PATH="${STAGE}/usr/lib:${LD_LIBRARY_PATH:-}"
 	# 4) ffmpeg‑rockchip
 	build_and_stage ffmpeg-rockchip \
 	  "./configure --prefix=/usr --enable-version3 \
@@ -210,22 +273,116 @@ Main() {
 				   --disable-xlib --disable-libxcb --disable-libxcb-shm \
 				   --disable-libxcb-xfixes --disable-libxcb-shape" \
 	  "make -j$JOBS" \
-	  "DESTDIR=${STAGE} make install"
+	  "make install"
 
 	# 5) Qt base
 	QtV=6.8.3
-	build_and_stage qtbase \
-	  "rm -rf build && mkdir build && cd build && cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=RelWithDebInfo -DINSTALL_BINDIR=lib/qt6/bin -DINSTALL_PUBLICBINDIR=usr/bin -DINSTALL_LIBEXECDIR=lib/qt6 -DINSTALL_DOCDIR=share/doc/qt6 -DINSTALL_ARCHDATADIR=lib/qt6 -DINSTALL_DATADIR=share/qt6 -DINSTALL_INCLUDEDIR=include/qt6 -DINSTALL_MKSPECSDIR=lib/qt6/mkspecs -DQT_NO_MAKE_EXAMPLES=ON -DQT_BUILD_EXAMPLES_BY_DEFAULT=OFF -DQT_BUILD_TESTS_BY_DEFAULT=OFF -DQT_INSTALL_EXAMPLES_SOURCES_BY_DEFAULT=OFF -DFEATURE_journald=ON -DFEATURE_libproxy=ON -DQT_FEATURE_eglfs=ON -DFEATURE_openssl_linked=ON -DFEATURE_system_sqlite=ON -DFEATURE_no_direct_extern_access=OFF -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON -DQT_FEATURE_opengles2=ON -DQT_FEATURE_opengles3=ON .." \
-	  "cmake --build build -j$JOBS" \
-	  "cmake --install build"
-
+        build_and_stage qtbase \
+          "rm -rf build && cmake -S . -B build -G Ninja \
+		      -DCMAKE_INSTALL_PREFIX=/usr \
+				-DCMAKE_BUILD_TYPE=RelWithDebInfo \
+				-DINSTALL_BINDIR=lib/qt6/bin \
+				-DINSTALL_PUBLICBINDIR=usr/bin \
+				-DINSTALL_LIBEXECDIR=lib/qt6 \
+				-DINSTALL_DOCDIR=share/doc/qt6 \
+				-DINSTALL_ARCHDATADIR=lib/qt6 \
+				-DINSTALL_DATADIR=share/qt6 \
+				-DINSTALL_INCLUDEDIR=include/qt6 \
+				-DINSTALL_MKSPECSDIR=lib/qt6/mkspecs \
+				-DQT_NO_MAKE_EXAMPLES=ON \
+				-DQT_INSTALL_EXAMPLES_SOURCES_BY_DEFAULT=OFF \
+				-DQT_BUILD_EXAMPLES_BY_DEFAULT=OFF \
+				-DQT_BUILD_TESTS_BY_DEFAULT=OFF \
+				-DQT_BUILD_EXAMPLES=OFF \
+				-DQT_BUILD_TESTS=OFF \
+				-DFEATURE_journald=ON \
+				-DFEATURE_libproxy=ON \
+				-DQT_FEATURE_eglfs=ON \
+				-DFEATURE_openssl_linked=ON \
+				-DFEATURE_system_sqlite=ON \
+				-DFEATURE_no_direct_extern_access=OFF \
+				-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+				-DQT_FEATURE_opengles2=ON \
+				-DQT_FEATURE_opengles3=ON" \
+          "cmake --build build -j$JOBS" \
+          "cmake --install build"
 	# 6..9) Qt modules, ECM, ktexttemplate, qtkeychain  (loop)
-	for mod in qtshadertools qtwebsockets qtdeclarative qtmultimedia qtnetworkauth qthttpserver qtremoteobjects extra-cmake-modules ktexttemplate qtkeychain; do
+	for mod in qtshadertools qtwebsockets qtdeclarative ; do
 	  [[ -d ${SRC}/${mod} ]] || continue
-	  build_and_stage "${mod}" \
-		"rm -rf build && mkdir build && cd build && cmake -G Ninja -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=RelWithDebInfo -DINSTALL_BINDIR=lib/qt6/bin -DINSTALL_PUBLICBINDIR=usr/bin -DINSTALL_LIBEXECDIR=lib/qt6 -DINSTALL_DATADIR=share/qt6 -DINSTALL_INCLUDEDIR=include/qt6 -DINSTALL_MKSPECSDIR=lib/qt6/mkspecs -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON .." \
-		"cmake --build build -j$JOBS" \
-		"cmake --install build"
+      build_and_stage "${mod}" \
+        "rm -rf build && \
+		 export CFLAGS=\"\$(pkg-config --cflags libva libva-drm)\" && \
+		 export LDFLAGS=\"\$(pkg-config --libs libva libva-drm)\" && \
+		cmake -S . -B build -G Ninja \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DINSTALL_BINDIR=lib/qt6/bin \
+            -DINSTALL_PUBLICBINDIR=usr/bin \
+            -DINSTALL_LIBEXECDIR=lib/qt6 \
+            -DINSTALL_DATADIR=share/qt6 \
+            -DINSTALL_INCLUDEDIR=include/qt6 \
+            -DINSTALL_MKSPECSDIR=lib/qt6/mkspecs \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON" \
+        "cmake --build build -j$JOBS" \
+        "cmake --install build"
+	done
+
+        build_and_stage qtmultimedia \
+        "rm -rf build && \
+		cmake -S . -B build -G Ninja \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DINSTALL_BINDIR=lib/qt6/bin \
+            -DINSTALL_PUBLICBINDIR=usr/bin \
+            -DINSTALL_LIBEXECDIR=lib/qt6 \
+            -DINSTALL_DATADIR=share/qt6 \
+            -DINSTALL_INCLUDEDIR=include/qt6 \
+            -DINSTALL_MKSPECSDIR=lib/qt6/mkspecs \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+			-DQT_FEATURE_ffmpeg=OFF "\
+        "cmake --build build -j$JOBS" \
+        "cmake --install build"
+
+	for mod in qtnetworkauth qthttpserver qtremoteobjects extra-cmake-modules ktexttemplate qtkeychain; do
+	  [[ -d ${SRC}/${mod} ]] || continue
+
+
+		# ---- default flags shared by most Qt‑based modules --------------------
+		cmake_flags="-DCMAKE_INSTALL_PREFIX=/usr \
+					 -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+					 -DINSTALL_BINDIR=lib/qt6/bin \
+					 -DINSTALL_PUBLICBINDIR=usr/bin \
+					 -DINSTALL_LIBEXECDIR=lib/qt6 \
+					 -DINSTALL_DATADIR=share/qt6 \
+					 -DINSTALL_INCLUDEDIR=include/qt6 \
+					 -DINSTALL_MKSPECSDIR=lib/qt6/mkspecs \
+					 -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+					 -DCMAKE_MESSAGE_LOG_LEVEL=STATUS"
+
+		# ---- module‑specific tweaks ------------------------------------------
+		case "$mod" in
+			extra-cmake-modules)
+				# ECM is a pure CMake helper library: no Qt‑specific install dirs
+				cmake_flags="-DCMAKE_INSTALL_PREFIX=/usr \
+							 -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+							 -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+							 -DCMAKE_MESSAGE_LOG_LEVEL=STATUS"
+				;;
+			ktexttemplate)
+				# already fine with default flags (needs Qt‑style install dirs)
+				;;
+			qtkeychain)
+				cmake_flags="${cmake_flags} \
+							 -DBUILD_WITH_QT6=ON \
+							 -DBUILD_TRANSLATIONS=OFF"
+				;;
+			esac
+
+		build_and_stage "$mod" \
+			"rm -rf build && cmake -S . -B build -G Ninja ${cmake_flags}" \
+			"cmake --build build -j${JOBS}" \
+			"cmake --install build"
+
 	done
 } # Main
 
