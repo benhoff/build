@@ -22,53 +22,49 @@ SRC=/tmp/overlay/src
 STAGE=""
 JOBS=$(nproc)
 
-# Persisted cache dir (host side: build/cache/ccache)
-export CCACHE_DIR="/var/cache/ccache"
-mkdir -p "${CCACHE_DIR}"
+: "${CACHE_ROOT:=/var/cache/ccache/build-artifacts}"
+mkdir -p "${CACHE_ROOT}"
 
-# Fast tmpfs staging to avoid write‑amplification on the cache drive
+
+# ────────── ccache setup (mirrors Armbian kernel build) ────────────────────
+export CCACHE_DIR="/var/cache/ccache"       # already bind-mounted rw
 export CCACHE_TEMPDIR="/dev/shm/ccache-tmp"
-mkdir -p "${CCACHE_TEMPDIR}"
-
-# Base directory for hash‑normalisation
-# Choose a path that is the *same* across builds; using /tmp/overlay/src works
 export CCACHE_BASEDIR="/tmp/overlay/src"
-
-# Make sure the wrappers are found first
+mkdir -p "${CCACHE_DIR}" "${CCACHE_TEMPDIR}"
 export PATH="/usr/lib/ccache:${PATH}"
 
-# Optional: forward existing distcc settings if you have them
-[[ -n "${DISTCC_DIR:-}" ]]      && export DISTCC_DIR
-[[ -n "${DISTCC_HOSTS:-}" ]]    && export DISTCC_HOSTS
-[[ -n "${DISTCC_POTENTIAL_HOSTS:-}" ]] && export DISTCC_POTENTIAL_HOSTS
+# Optional distcc forwards (safe with set -u thanks to defaults)
+export DISTCC_DIR="${DISTCC_DIR:-}"
+export DISTCC_HOSTS="${DISTCC_HOSTS:-}"
+export DISTCC_POTENTIAL_HOSTS="${DISTCC_POTENTIAL_HOSTS:-}"
+
+# ────────── mark every repo in /tmp/overlay/src as “safe” for Git ──────────
+if command -v git >/dev/null; then
+    for repo in "${SRC}"/*; do
+        [[ -d "${repo}/.git" ]] && git config --global --add safe.directory "${repo}"
+    done
+fi
+
 
 # ---------------------------------------------------------------------------
 build_and_stage() {
     local name=$1 conf_cmd=$2 build_cmd=$3 install_cmd=$4
+    local rev cache_dir artefact_tar build_tar
 
-    # ── unique revision identifier ─────────────────────────────────────────
-    local rev
     if [[ -d "${SRC}/${name}/.git" ]]; then
-        rev=$(git -C "${SRC}/${name}" rev-parse --short HEAD)
+        rev="$(git -C "${SRC}/${name}" rev-parse --short HEAD)"
     else
-        rev=$(stat -c %Y "${SRC}/${name}")           # mtime fallback
+        rev="$(stat -c %Y "${SRC}/${name}")"   # fallback: mtime
     fi
-
-    # ── cache paths ───────────────────────────────────────────────────────
     local cache_dir="${CACHE_ROOT}/${name}"
     local artefact_tar="${cache_dir}/${rev}.tar.zst"
     local build_tar="${cache_dir}/${rev}.build.tar.zst"
+	mkdir -p "${cache_dir}"
 
-    # ── reuse cache if possible ───────────────────────────────────────────
-    if [[ ${CACHE_DISABLE} -eq 0 && -f "${artefact_tar}" ]]; then
+   # ---------- fast-path: restore from cache ------------------------------
+    if [[ -f "${artefact_tar}" ]]; then
         echo "[cache  ] ${name} – restoring artefacts (${rev})"
-        if [[ -n "${STAGE}" ]]; then
-            tar --zstd -xf "${artefact_tar}" -C "${STAGE}"
-        else
-            tar --zstd -xf "${artefact_tar}" -C /
-        fi
-
-        # Restore build dir as convenience for interactive hacking
+        tar --zstd -xf "${artefact_tar}" -C "${STAGE:-/}"
         if [[ -f "${build_tar}" ]]; then
             local WRK="/tmp/build-${name}"
             rm -rf "${WRK}"
@@ -78,35 +74,33 @@ build_and_stage() {
         return
     fi
 
-    # ── fresh build path ──────────────────────────────────────────────────
+    # ---------- full build --------------------------------------------------
     echo "[build  ] ${name}"
-    mkdir -p "${cache_dir}"
     local WRK="/tmp/build-${name}"
     rm -rf "${WRK}"
     rsync -a --delete "${SRC}/${name}/" "${WRK}/"
-    pushd "${WRK}"
+    pushd "${WRK}" >/dev/null
 
-    # ── configure / compile / install ─────────────────────────────────────
     eval "${conf_cmd}"
     eval "${build_cmd}"
 
-    if [[ -n "${STAGE}" ]]; then
-        DESTDIR="${STAGE}" eval "${install_cmd}"
-        tar --zstd -cf "${artefact_tar}.tmp" -C "${STAGE}" .
-    else
-        eval "${install_cmd}"
-        tar --zstd -cf "${artefact_tar}.tmp" -C / .
-    fi
-    mv "${artefact_tar}.tmp" "${artefact_tar}"   # atomic
+    # Install into a private dir first
+    local PKGDIR
+    PKGDIR="$(mktemp -d /tmp/pkg-${name}-XXXXXX)"
+    DESTDIR="${PKGDIR}" eval "${install_cmd}"
 
-    # ── save build directory (incremental convenience) ────────────────────
-    tar --zstd -cf "${build_tar}.tmp" -C "${WRK}" .
-    mv "${build_tar}.tmp" "${build_tar}"
+    # Archive artefacts & build dir
+    tar --zstd -C "${PKGDIR}" -cf "${artefact_tar}.tmp" .
+    mv "${artefact_tar}.tmp" "${artefact_tar}"
+    tar --zstd -C "${WRK}"   -cf "${build_tar}.tmp" .
+    mv "${build_tar}.tmp"    "${build_tar}"
 
-    popd
-    rm -rf "${WRK}"
+    # Copy into live root (or $STAGE)
+    rsync -a "${PKGDIR}/" "${STAGE:-/}/"
+
+    popd >/dev/null
+    rm -rf "${WRK}" "${PKGDIR}"
 }
-
 
 Main() {
 	case $RELEASE in
