@@ -103,127 +103,11 @@ build_and_stage() {
 }
 
 Main() {
+	# adduser --system --home /home/wulfdata --shell /bin/bash --group wulfdata
+	# loginctl enable-linger wulfuser
 	case $RELEASE in
 		noble)
-			apt-get update && \
-				apt-get install -y --no-install-recommends \
-				ccache \
-				build-essential \
-				locales \
-				git \
-				ca-certificates \
-				cmake \
-				ninja-build \
-				brotli \
-				dbus \
-				meson \
-				libva-dev \
-				libva-drm2 \
-				libdouble-conversion-dev \
-				libfontconfig1-dev \
-				libfreetype6-dev \
-				libdrm-dev \
-				libglib2.0-dev \
-				libharfbuzz-dev \
-				libicu-dev \
-				libkrb5-dev \
-				libb2-dev \
-				libdrm-dev \
-				libice-dev \
-				libinput-dev \
-				libjpeg-dev \
-				libpipewire-0.3-dev \
-				libpng-dev \
-				libproxy-dev \
-				libcurl4-openssl-dev \
-				libsm-dev \
-				libx11-dev \
-				libxcb1-dev \
-				libxkbcommon-dev \
-				libxkbcommon-x11-dev \
-				libegl-dev \
-				libgles-dev \
-				libgl-dev \
-				libgbm-dev \
-				openssl \
-				libssl-dev \
-				libpcre2-dev \
-				shared-mime-info \
-				libsqlite3-dev \
-				libsystemd-dev \
-				libts-dev \
-				libvulkan-dev \
-				libwayland-dev \
-				libxcb-util-dev \
-				libxcb-cursor-dev \
-				libxcb-image0-dev \
-				libxcb-keysyms1-dev \
-				libxcb-render-util0-dev \
-				libxcb-icccm4-dev \
-				libxcb-sync-dev \
-				libxdg-basedir-dev \
-				zlib1g-dev \
-				zstd \
-				libasound2-dev \
-				freetds-dev \
-				libgstreamer1.0-dev \
-				gstreamer1.0-plugins-good \
-				libgtk-3-dev \
-				libfbclient2 \
-				libpulse-dev \
-				libmariadb-dev \
-				libpq-dev \
-				unixodbc-dev \
-				xmlstarlet \
-				perl \
-				libglvnd-dev \
-				libglx-dev \
-				libopengl-dev \
-				libspeexdsp-dev \
-				libboost-all-dev \
-				pkg-config \
-				libpci-dev \
-				libmsgsl-dev \
-				libsecret-1-dev \
-				llvm-dev \
-				libclang-dev \
-				libclc-18-dev \
-				python3-mako \
-				python3-markupsafe \
-				python3-ply \
-				python3-pygments \
-				gstreamer1.0-plugins-base \
-				va-driver-all \
-				libexpat1-dev \
-				libxext-dev \
-				libxcb-xfixes0-dev \
-				libxfixes-dev \
-				libxcb-shm0-dev \
-				libxxf86vm-dev \
-				libxshmfence-dev \
-				libxcb-glx0 \
-				libxcb-dri2-0-dev \
-				libxcb-dri3-dev \
-				libxcb-glx0-dev \
-				libva-wayland2 \
-				libx11-xcb-dev \
-				libxshmfence-dev \
-				libxxf86vm-dev \
-				wayland-protocols \
-				glslang-tools \
-				icu-devtools \
-				libwayland-dev \
-				libvdpau-dev \
-				libvdpau1 \
-				libvulkan-dev \
-				libvulkan1 \
-				libwayland-egl-backend-dev \
-				libxcb-present-dev \
-				libxcb-randr0 \
-				libxcb-randr0-dev \
-				libxcb-sync-dev \
-				libxrandr-dev \
-				libllvmspirvlib-18-dev
+			# if we need
 			;;
 		stretch)
 			# your code here
@@ -242,6 +126,15 @@ Main() {
 			# your code here
 			;;
 	esac
+	# usermod -aG pipewire wulfuser
+	# dpkg-reconfigure --priority=low unattended-upgrades
+
+	# FIXME: ln -sf instead
+	# sudo -u wulfdata systemctl --user enable pipewire pipewire-pulse linkaudio
+
+	# systemctl disable --now systemd-resolved
+	# systemctl enable avahi-daemon
+
 	if [[ -d ${SRC}/mesa ]]; then
 		build_and_stage mesa \
 			"meson setup build -Dvulkan-drivers= -Dgallium-drivers=panfrost -Degl=true -Dgbm=true -Dglvnd=true" \
@@ -305,8 +198,6 @@ Main() {
 	  [[ -d ${SRC}/${mod} ]] || continue
       build_and_stage "${mod}" \
         "rm -rf build && \
-		 export CFLAGS=\"\$(pkg-config --cflags libva libva-drm)\" && \
-		 export LDFLAGS=\"\$(pkg-config --libs libva libva-drm)\" && \
 		cmake -S . -B build -G Ninja \
             -DCMAKE_INSTALL_PREFIX=/usr \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -378,6 +269,13 @@ Main() {
 			"cmake --install build"
 
 	done
+
+	cd /root/swdev/wulf-linux-config
+	make -j$JOBS PREFIX=/usr/local all
+
+	# FIXME: use ln -sf
+	# systemctl enable usbgadget
+
 } # Main
 
 
