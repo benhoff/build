@@ -18,6 +18,7 @@ ubuntu-*-cloudimg-console.log
 /userpatches/*
 !/userpatches/customize-image-host.sh
 !/userpatches/customize-image.sh
+!userpatches/kernel/rk35xx-vendor-6.1/*.patch
 repos
 
 ### General annoyances ###
