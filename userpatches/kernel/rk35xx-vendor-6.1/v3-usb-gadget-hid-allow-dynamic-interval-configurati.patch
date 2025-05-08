@@ -1,0 +1,286 @@
+From 90177d849f2538a666947c68d52a592fcca4556a Mon Sep 17 00:00:00 2001
+From: Ben Hoff <hoff.benjamin.k@gmail.com>
+Date: Tue, 29 Apr 2025 13:49:05 -0400
+Subject: [PATCH v3] usb: gadget: hid: allow dynamic interval configuration via
+ configfs
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+This patch enhances the HID gadget driver to support dynamic configuration
+of the interrupt polling interval (bInterval) via configfs.  A new
+‘interval’ attribute is exposed under each HID function’s configfs
+directory, and any write to it will adjust the poll rate for all endpoints
+without requiring a rebuild.
+
+When the attribute has never been written, legacy defaults are preserved:
+  • Full-Speed (FS) endpoints (IN & OUT) poll every 10 ms
+  • High-Speed (HS) endpoints (IN & OUT) poll every 4 micro-frames
+    (~1 ms)
+
+To implement this cleanly:
+  • Add two new fields to f_hid_opts and f_hidg:
+      – unsigned char interval
+      – bool           interval_user_set
+  • Introduce dedicated f_hid_opts_interval_show/store functions.
+    The store routine parses into an unsigned int, bounds‐checks,
+    assigns to opts->interval, and sets opts->interval_user_set = true.
+  • Initialize opts->interval = 4 and opts->interval_user_set = false in
+    hidg_alloc_inst(), then copy both into the live f_hidg instance in
+    hidg_alloc().
+  • In hidg_bind(), set each endpoint’s bInterval based on whether the
+  user has written the attribute:
+      – If interval_user_set == false, use FS=10 / HS=4
+      – If interval_user_set == true, use the user’s value for both FS
+        & HS
+
+Signed-off-by: Ben Hoff <hoff.benjamin.k@gmail.com>
+---
+Changes since v1:
+  - Added dedicated interval_show/store helpers
+  - Restored original default values (FS=10 ms, HS=4 µ-frame) for both
+    IN and OUT when unset.
+
+Changes since v2:
+  -  Corrected commit message
+
+ drivers/usb/gadget/function/f_hid.c | 119 ++++++++++++++++++++--------
+ drivers/usb/gadget/function/u_hid.h |   2 +
+ 2 files changed, 90 insertions(+), 31 deletions(-)
+
+diff --git a/drivers/usb/gadget/function/f_hid.c b/drivers/usb/gadget/function/f_hid.c
+index 740311c4fa24..3c4212929812 100644
+--- a/drivers/usb/gadget/function/f_hid.c
++++ b/drivers/usb/gadget/function/f_hid.c
+@@ -62,6 +62,9 @@ struct f_hidg {
+ 	unsigned short			report_desc_length;
+ 	char				*report_desc;
+ 	unsigned short			report_length;
++	unsigned char			interval;
++	bool				interval_user_set;
++
+ 	/*
+ 	 * use_out_ep - if true, the OUT Endpoint (interrupt out method)
+ 	 *              will be used to receive reports from the host
+@@ -156,10 +159,7 @@ static struct usb_endpoint_descriptor hidg_ss_in_ep_desc = {
+ 	.bEndpointAddress	= USB_DIR_IN,
+ 	.bmAttributes		= USB_ENDPOINT_XFER_INT,
+ 	/*.wMaxPacketSize	= DYNAMIC */
+-	.bInterval		= 4, /* FIXME: Add this field in the
+-				      * HID gadget configuration?
+-				      * (struct hidg_func_descriptor)
+-				      */
++	/*.bInterval		= DYNAMIC */
+ };
+ 
+ static struct usb_ss_ep_comp_descriptor hidg_ss_in_comp_desc = {
+@@ -177,10 +177,7 @@ static struct usb_endpoint_descriptor hidg_ss_out_ep_desc = {
+ 	.bEndpointAddress	= USB_DIR_OUT,
+ 	.bmAttributes		= USB_ENDPOINT_XFER_INT,
+ 	/*.wMaxPacketSize	= DYNAMIC */
+-	.bInterval		= 4, /* FIXME: Add this field in the
+-				      * HID gadget configuration?
+-				      * (struct hidg_func_descriptor)
+-				      */
++	/*.bInterval		= DYNAMIC */
+ };
+ 
+ static struct usb_ss_ep_comp_descriptor hidg_ss_out_comp_desc = {
+@@ -218,10 +215,7 @@ static struct usb_endpoint_descriptor hidg_hs_in_ep_desc = {
+ 	.bEndpointAddress	= USB_DIR_IN,
+ 	.bmAttributes		= USB_ENDPOINT_XFER_INT,
+ 	/*.wMaxPacketSize	= DYNAMIC */
+-	.bInterval		= 4, /* FIXME: Add this field in the
+-				      * HID gadget configuration?
+-				      * (struct hidg_func_descriptor)
+-				      */
++	/* .bInterval		= DYNAMIC */
+ };
+ 
+ static struct usb_endpoint_descriptor hidg_hs_out_ep_desc = {
+@@ -230,10 +224,7 @@ static struct usb_endpoint_descriptor hidg_hs_out_ep_desc = {
+ 	.bEndpointAddress	= USB_DIR_OUT,
+ 	.bmAttributes		= USB_ENDPOINT_XFER_INT,
+ 	/*.wMaxPacketSize	= DYNAMIC */
+-	.bInterval		= 4, /* FIXME: Add this field in the
+-				      * HID gadget configuration?
+-				      * (struct hidg_func_descriptor)
+-				      */
++	/*.bInterval		= DYNAMIC */
+ };
+ 
+ static struct usb_descriptor_header *hidg_hs_descriptors_intout[] = {
+@@ -259,10 +250,7 @@ static struct usb_endpoint_descriptor hidg_fs_in_ep_desc = {
+ 	.bEndpointAddress	= USB_DIR_IN,
+ 	.bmAttributes		= USB_ENDPOINT_XFER_INT,
+ 	/*.wMaxPacketSize	= DYNAMIC */
+-	.bInterval		= 10, /* FIXME: Add this field in the
+-				       * HID gadget configuration?
+-				       * (struct hidg_func_descriptor)
+-				       */
++	/*.bInterval		= DYNAMIC */
+ };
+ 
+ static struct usb_endpoint_descriptor hidg_fs_out_ep_desc = {
+@@ -271,10 +259,7 @@ static struct usb_endpoint_descriptor hidg_fs_out_ep_desc = {
+ 	.bEndpointAddress	= USB_DIR_OUT,
+ 	.bmAttributes		= USB_ENDPOINT_XFER_INT,
+ 	/*.wMaxPacketSize	= DYNAMIC */
+-	.bInterval		= 10, /* FIXME: Add this field in the
+-				       * HID gadget configuration?
+-				       * (struct hidg_func_descriptor)
+-				       */
++	/*.bInterval		= DYNAMIC */
+ };
+ 
+ static struct usb_descriptor_header *hidg_fs_descriptors_intout[] = {
+@@ -1202,6 +1187,16 @@ static int hidg_bind(struct usb_configuration *c, struct usb_function *f)
+ 	hidg_hs_in_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
+ 	hidg_fs_in_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
+ 	hidg_ss_out_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
++
++	/* IN endpoints: FS default=10ms, HS default=4µ-frame; user override if set */
++	if (!hidg->interval_user_set) {
++		hidg_fs_in_ep_desc.bInterval = 10;
++		hidg_hs_in_ep_desc.bInterval = 4;
++	} else {
++		hidg_fs_in_ep_desc.bInterval = hidg->interval;
++		hidg_hs_in_ep_desc.bInterval = hidg->interval;
++	}
++
+ 	hidg_ss_out_comp_desc.wBytesPerInterval =
+ 				cpu_to_le16(hidg->report_length);
+ 	hidg_hs_out_ep_desc.wMaxPacketSize = cpu_to_le16(hidg->report_length);
+@@ -1224,19 +1219,27 @@ static int hidg_bind(struct usb_configuration *c, struct usb_function *f)
+ 	hidg_ss_out_ep_desc.bEndpointAddress =
+ 		hidg_fs_out_ep_desc.bEndpointAddress;
+ 
+-	if (hidg->use_out_ep)
++	if (hidg->use_out_ep) {
++		/* OUT endpoints: same defaults (FS=10, HS=4) unless user set */
++		if (!hidg->interval_user_set) {
++			hidg_fs_out_ep_desc.bInterval = 10;
++			hidg_hs_out_ep_desc.bInterval = 4;
++		} else {
++			hidg_fs_out_ep_desc.bInterval = hidg->interval;
++			hidg_hs_out_ep_desc.bInterval = hidg->interval;
++		}
+ 		status = usb_assign_descriptors(f,
+-			hidg_fs_descriptors_intout,
+-			hidg_hs_descriptors_intout,
+-			hidg_ss_descriptors_intout,
+-			hidg_ss_descriptors_intout);
+-	else
++			    hidg_fs_descriptors_intout,
++			    hidg_hs_descriptors_intout,
++			    hidg_ss_descriptors_intout,
++			    hidg_ss_descriptors_intout);
++	} else {
+ 		status = usb_assign_descriptors(f,
+ 			hidg_fs_descriptors_ssreport,
+ 			hidg_hs_descriptors_ssreport,
+ 			hidg_ss_descriptors_ssreport,
+ 			hidg_ss_descriptors_ssreport);
+-
++	}
+ 	if (status)
+ 		goto fail;
+ 
+@@ -1408,6 +1411,53 @@ static ssize_t f_hid_opts_report_desc_store(struct config_item *item,
+ 
+ CONFIGFS_ATTR(f_hid_opts_, report_desc);
+ 
++static ssize_t f_hid_opts_interval_show(struct config_item *item, char *page)
++{
++	struct f_hid_opts *opts = to_f_hid_opts(item);
++	int result;
++
++	mutex_lock(&opts->lock);
++	result = sprintf(page, "%d\n", opts->interval);
++	mutex_unlock(&opts->lock);
++
++	return result;
++}
++
++static ssize_t f_hid_opts_interval_store(struct config_item *item,
++		const char *page, size_t len)
++{
++	struct f_hid_opts *opts = to_f_hid_opts(item);
++	int ret;
++	unsigned int tmp;
++
++	mutex_lock(&opts->lock);
++	if (opts->refcnt) {
++		ret = -EBUSY;
++		goto end;
++	}
++
++	/* parse into a wider type first */
++	ret = kstrtouint(page, 0, &tmp);
++	if (ret)
++		goto end;
++
++	/* range-check against unsigned char max */
++	if (tmp > 255) {
++		ret = -EINVAL;
++		goto end;
++	}
++
++	opts->interval = (unsigned char)tmp;
++	opts->interval_user_set = true;
++	ret = len;
++
++end:
++	mutex_unlock(&opts->lock);
++	return ret;
++}
++
++CONFIGFS_ATTR(f_hid_opts_, interval);
++
+ static ssize_t f_hid_opts_dev_show(struct config_item *item, char *page)
+ {
+ 	struct f_hid_opts *opts = to_f_hid_opts(item);
+@@ -1422,6 +1472,7 @@ static struct configfs_attribute *hid_attrs[] = {
+ 	&f_hid_opts_attr_protocol,
+ 	&f_hid_opts_attr_no_out_endpoint,
+ 	&f_hid_opts_attr_report_length,
++	&f_hid_opts_attr_interval,
+ 	&f_hid_opts_attr_report_desc,
+ 	&f_hid_opts_attr_dev,
+ 	NULL,
+@@ -1468,6 +1519,10 @@ static struct usb_function_instance *hidg_alloc_inst(void)
+ 	if (!opts)
+ 		return ERR_PTR(-ENOMEM);
+ 	mutex_init(&opts->lock);
++
++	opts->interval = 4;
++	opts->interval_user_set = false;
++
+ 	opts->func_inst.free_func_inst = hidg_free_inst;
+ 	ret = &opts->func_inst;
+ 
+@@ -1546,6 +1601,8 @@ static struct usb_function *hidg_alloc(struct usb_function_instance *fi)
+ 	hidg->bInterfaceProtocol = opts->protocol;
+ 	hidg->report_length = opts->report_length;
+ 	hidg->report_desc_length = opts->report_desc_length;
++	hidg->interval = opts->interval;
++	hidg->interval_user_set = opts->interval_user_set;
+ 	if (opts->report_desc) {
+ 		hidg->report_desc = kmemdup(opts->report_desc,
+ 					    opts->report_desc_length,
+diff --git a/drivers/usb/gadget/function/u_hid.h b/drivers/usb/gadget/function/u_hid.h
+index 84bb70292855..a9ed9720caee 100644
+--- a/drivers/usb/gadget/function/u_hid.h
++++ b/drivers/usb/gadget/function/u_hid.h
+@@ -25,6 +25,8 @@ struct f_hid_opts {
+ 	unsigned short			report_desc_length;
+ 	unsigned char			*report_desc;
+ 	bool				report_desc_alloc;
++	unsigned char			interval;
++	bool				interval_user_set;
+ 
+ 	/*
+ 	 * Protect the data form concurrent access by read/write
+-- 
+2.49.0
+
