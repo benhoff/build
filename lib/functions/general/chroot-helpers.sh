@@ -16,7 +16,9 @@ function mount_chroot() {
 	local target
 	target="$(realpath "$1")" # normalize, remove last slash if dir
 	display_alert "mount_chroot" "$target" "debug"
+
 	mkdir -p "${target}/run/user/0"
+	mkdir -p "${target}/armbian/cache"
 
 	# tmpfs size=50% is the Linux default, but we need more.
 	mount -t tmpfs -o "size=99%" tmpfs "${target}/tmp"
@@ -26,6 +28,8 @@ function mount_chroot() {
 	mount -t sysfs chsys "${target}"/sys
 	mount --bind /dev "${target}"/dev
 	mount -t devpts chpts "${target}"/dev/pts || mount --bind /dev/pts "${target}"/dev/pts
+
+	mount --bind /armbian/cache "${target}/armbian/cache"
 }
 
 # umount_chroot <target>

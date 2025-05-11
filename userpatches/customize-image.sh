@@ -22,15 +22,25 @@ SRC=/tmp/overlay/src
 STAGE=""
 JOBS=$(nproc)
 
-: "${CACHE_ROOT:=/var/cache/ccache/build-artifacts}"
-mkdir -p "${CACHE_ROOT}"
+## ────────── pick cache location ───────────────────────────────────────────
+# Prefer the persistent host-side mount at /armbian/cache; otherwise keep
+# using /var/cache/ccache as before.
+if [[ -d /armbian/cache ]]; then
+    : "${CACHE_ROOT:=/armbian/cache/build-artifacts}"
+    export CCACHE_DIR="/armbian/cache/ccache"
+else
+    : "${CACHE_ROOT:=/var/cache/ccache/build-artifacts}"
+    export CCACHE_DIR="/var/cache/ccache"
+fi
 
+# Ensure required sub-dirs exist
+mkdir -p "${CACHE_ROOT}" "${CCACHE_DIR}"
 
 # ────────── ccache setup (mirrors Armbian kernel build) ────────────────────
-export CCACHE_DIR="/var/cache/ccache"       # already bind-mounted rw
+# CCACHE_DIR is now set above
 export CCACHE_TEMPDIR="/dev/shm/ccache-tmp"
 export CCACHE_BASEDIR="/tmp/overlay/src"
-mkdir -p "${CCACHE_DIR}" "${CCACHE_TEMPDIR}"
+mkdir -p "${CCACHE_TEMPDIR}"
 export PATH="/usr/lib/ccache:${PATH}"
 
 # Optional distcc forwards (safe with set -u thanks to defaults)
@@ -167,6 +177,8 @@ Main() {
         build_and_stage qtbase \
           "rm -rf build && cmake -S . -B build -G Ninja \
 		      -DCMAKE_INSTALL_PREFIX=/usr \
+			  -DCMAKE_C_COMPILER_LAUNCHER=/usr/bin/ccache \
+			  -DCMAKE_CXX_COMPILER_LAUNCHER=/usr/bin/ccache \
 				-DCMAKE_BUILD_TYPE=RelWithDebInfo \
 				-DINSTALL_BINDIR=lib/qt6/bin \
 				-DINSTALL_PUBLICBINDIR=usr/bin \
@@ -200,6 +212,8 @@ Main() {
         "rm -rf build && \
 		cmake -S . -B build -G Ninja \
             -DCMAKE_INSTALL_PREFIX=/usr \
+			  -DCMAKE_C_COMPILER_LAUNCHER=/usr/bin/ccache \
+			  -DCMAKE_CXX_COMPILER_LAUNCHER=/usr/bin/ccache \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DINSTALL_BINDIR=lib/qt6/bin \
             -DINSTALL_PUBLICBINDIR=usr/bin \
@@ -216,6 +230,8 @@ Main() {
         "rm -rf build && \
 		cmake -S . -B build -G Ninja \
             -DCMAKE_INSTALL_PREFIX=/usr \
+			  -DCMAKE_C_COMPILER_LAUNCHER=/usr/bin/ccache \
+			  -DCMAKE_CXX_COMPILER_LAUNCHER=/usr/bin/ccache \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DINSTALL_BINDIR=lib/qt6/bin \
             -DINSTALL_PUBLICBINDIR=usr/bin \
@@ -235,6 +251,8 @@ Main() {
 		# ---- default flags shared by most Qt‑based modules --------------------
 		cmake_flags="-DCMAKE_INSTALL_PREFIX=/usr \
 					 -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+					  -DCMAKE_C_COMPILER_LAUNCHER=/usr/bin/ccache \
+					  -DCMAKE_CXX_COMPILER_LAUNCHER=/usr/bin/ccache \
 					 -DINSTALL_BINDIR=lib/qt6/bin \
 					 -DINSTALL_PUBLICBINDIR=usr/bin \
 					 -DINSTALL_LIBEXECDIR=lib/qt6 \
@@ -250,6 +268,8 @@ Main() {
 				# ECM is a pure CMake helper library: no Qt‑specific install dirs
 				cmake_flags="-DCMAKE_INSTALL_PREFIX=/usr \
 							 -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+							  -DCMAKE_C_COMPILER_LAUNCHER=/usr/bin/ccache \
+							  -DCMAKE_CXX_COMPILER_LAUNCHER=/usr/bin/ccache \
 							 -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
 							 -DCMAKE_MESSAGE_LOG_LEVEL=STATUS"
 				;;
@@ -270,9 +290,9 @@ Main() {
 
 	done
 
-	cd /root/swdev/wulf-linux-config
-	make -j$JOBS PREFIX=/usr/local all
-
+	cd "${SRC}/wulf-linux-config" || exit 1
+	make -j"${JOBS}" PREFIX="/usr/local"
+	make install-etc
 	# FIXME: use ln -sf
 	# systemctl enable usbgadget
 
