@@ -67,5 +67,8 @@ clone_or_update https://github.com/qt/qtremoteobjects.git               qtremote
 clone_or_update https://github.com/KDE/extra-cmake-modules.git          extra-cmake-modules  $ECMV
 clone_or_update https://github.com/KDE/ktexttemplate.git                ktexttemplate        $ECMV
 clone_or_update https://github.com/frankosterfeld/qtkeychain.git        qtkeychain           $KEYV
-# clone_or_update /root/swdev/wulf-linux-config-bare				wulf-linux-config	master
-# clone_or_update /root/swdev/background_recorder_bare				background_recorder	master
+git config --global --add safe.directory /root/armbian/swdev/wulf-linux-config-bare
+git config --global --add safe.directory /root/armbian/swdev/background_recorder_bare
+
+clone_or_update /root/armbian/swdev/wulf-linux-config-bare				wulf-linux-config	master
+clone_or_update /root/armbian/swdev/background_recorder_bare			background_recorder	master
