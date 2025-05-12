@@ -113,6 +113,13 @@ build_and_stage() {
 }
 
 Main() {
+	cd "${SRC}/wulf-linux-config"
+	make clean && make PREFIX=/usr/local
+	echo "Install etc using make"
+	make install-etc DESTDIR=/
+	# FIXME: use ln -sf
+	# systemctl enable usbgadget
+
 	# adduser --system --home /home/wulfdata --shell /bin/bash --group wulfdata
 	# loginctl enable-linger wulfuser
 	case $RELEASE in
@@ -289,12 +296,6 @@ Main() {
 			"cmake --install build"
 
 	done
-
-	cd "${SRC}/wulf-linux-config" || exit 1
-	make -j"${JOBS}" PREFIX="/usr/local"
-	make install-etc
-	# FIXME: use ln -sf
-	# systemctl enable usbgadget
 
 } # Main
 
