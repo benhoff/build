@@ -40,7 +40,7 @@ function umount_chroot() {
 	local target
 	target="$(realpath "$1")" # normalize, remove last slash if dir
 	display_alert "Unmounting" "$target" "info"
-	while grep -Eq "${target}\/(dev|proc|sys|tmp|var\/tmp|run\/user\/0)" /proc/mounts; do
+	while grep -Eq "${target}\/(dev|proc|sys|tmp|var\/tmp|run\/user\/0|armbian\/cache)" /proc/mounts; do
 		display_alert "Unmounting..." "target: ${target}" "debug"
 		umount "${target}"/dev/pts || true
 		umount --recursive "${target}"/dev || true
@@ -49,6 +49,7 @@ function umount_chroot() {
 		umount "${target}"/tmp || true
 		umount "${target}"/var/tmp || true
 		umount "${target}"/run/user/0 || true
+		umount "${target}"/armbian/cache || true
 		wait_for_disk_sync "after umount chroot"
 		run_host_command_logged grep -E "'${target}/(dev|proc|sys|tmp)'" /proc/mounts "||" true
 	done
